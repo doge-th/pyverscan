@@ -134,6 +134,38 @@ _MISSING = object()
 _node_by_id: "dict[int, ast.AST]" = {}
 
 
+def _lazy_annotation_ids(tree: ast.Module) -> Set[int]:
+    """IDs of nodes whose evaluation a newer Python defers: a type alias's
+    value and the annotations of a PEP 695-parameterized function. Features
+    inside them are covered by the surrounding 3.12 finding, so they must
+    not double-count as confirmed builtin generics or unions."""
+    deferred: Set[int] = set()
+
+    def absorb(root: Optional[ast.AST]) -> None:
+        if root is None:
+            return
+        for child in ast.walk(root):
+            deferred.add(id(child))
+
+    for node in ast.walk(tree):
+        if _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
+            absorb(node.value)
+        elif getattr(node, "type_params", None) and isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            arguments = node.args
+            for argument in (
+                arguments.posonlyargs
+                + arguments.args
+                + arguments.kwonlyargs
+                + [arguments.vararg, arguments.kwarg]
+            ):
+                if argument is not None:
+                    absorb(argument.annotation)
+            absorb(node.returns)
+    return deferred
+
+
 def scan_source(source: str, path: str):
     """Returns (findings, unparsable). ``unparsable`` is None for a file this
     interpreter's parser accepts."""
@@ -145,6 +177,7 @@ def scan_source(source: str, path: str):
     for node in ast.walk(tree):
         _node_by_id[id(node)] = node
     annotation_roots = _annotation_root_ids(tree)
+    lazy_ids = _lazy_annotation_ids(tree)
 
     findings: List[Finding] = []
     deferred = _has_deferred_annotations(tree)
@@ -197,12 +230,12 @@ def scan_source(source: str, path: str):
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             if node.value.id in BUILTIN_GENERIC_NAMES:
                 feature = ANNOTATION_FEATURES["builtin_generics"]
-                add(node, feature, confirmed=not deferred)
+                add(node, feature, confirmed=not deferred and id(node) not in lazy_ids)
         # PEP 604 unions: a BitOr inside an annotation slot.
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
             if id(node) in annotation_roots or _in_annotation(node, annotation_roots):
                 feature = ANNOTATION_FEATURES["pep604_union"]
-                add(node, feature, confirmed=not deferred)
+                add(node, feature, confirmed=not deferred and id(node) not in lazy_ids)
         # Module-anchored attributes.
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name):
