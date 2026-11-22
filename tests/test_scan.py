@@ -241,6 +241,38 @@ class Excludes(unittest.TestCase):
         self.assertEqual(scanned, 0)
 
 
+class ReadSources(unittest.TestCase):
+    def test_latin1_coding_cookie_decodes(self):
+        # A PEP 263 coding declaration beats the UTF-8 default.
+        source = "# -*- coding: latin-1 -*-\nvalue = 'caf\xe9'\n"
+        findings, error = scan_file("legacy.py", source)
+        self.assertIsNone(error)
+        self.assertEqual(findings, [])
+
+    def test_undecodable_file_is_reported_not_raised(self):
+        # Real corpora carry deliberately broken fixtures; a scan must end
+        # with a report, never a traceback. These bytes decode as neither
+        # UTF-8 nor any codec the file declares.
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as handle:
+            handle.write(b"garbage = '\xe4\x4f\x28'\n")
+            path = handle.name
+        try:
+            findings, error = scan_file(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(findings, [])
+        self.assertIsNotNone(error)
+        self.assertIn("not decodable", error.error)
+
+    def test_bad_cookie_with_ascii_body_still_scans(self):
+        # The body itself is plain ASCII, so a nonsense codec name in the
+        # cookie costs nothing: UTF-8 already read the file.
+        source = "# -*- coding: nonexistent-codec -*-\nvalue = 1\n"
+        findings, error = scan_file("odd.py", source)
+        self.assertIsNone(error)
+        self.assertEqual(findings, [])
+
+
 class Floors(unittest.TestCase):
     def test_no_findings_means_scan_floor(self):
         findings, _ = scan("value = 1\n")

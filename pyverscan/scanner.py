@@ -14,6 +14,7 @@ on ``ast.Match`` before scanning anything.
 
 import ast
 import os
+import re
 from typing import Iterator, List, Optional, Set, Tuple
 
 from .features import (
@@ -117,17 +118,19 @@ def _annotation_root_ids(tree: ast.Module) -> Set[int]:
     return roots
 
 
-def _in_annotation(node: ast.AST, annotation_roots: Set[int]) -> bool:
-    """True when this node sits inside one of the annotation slots."""
-    seen: Set[int] = set()
-    stack = list(annotation_roots)
+def _in_annotation_ids(annotation_roots: Set[int]) -> Set[int]:
+    """IDs of every node inside an annotation slot, computed once so each
+    BitOr is a set lookup, not another walk. The roots are ids, resolved
+    through the scan's id-to-node table."""
+    inside: Set[int] = set()
+    stack = [_node_by_id.get(root) for root in annotation_roots]
     while stack:
-        current = stack.pop()
-        if current in seen:
+        node = stack.pop()
+        if node is None or id(node) in inside:
             continue
-        seen.add(current)
-        stack.extend(id(child) for child in ast.iter_child_nodes(_node_by_id.get(current, _MISSING)))
-    return id(node) in seen
+        inside.add(id(node))
+        stack.extend(ast.iter_child_nodes(node))
+    return inside
 
 
 _MISSING = object()
@@ -178,6 +181,7 @@ def scan_source(source: str, path: str):
         _node_by_id[id(node)] = node
     annotation_roots = _annotation_root_ids(tree)
     lazy_ids = _lazy_annotation_ids(tree)
+    inside_annotation = _in_annotation_ids(annotation_roots)
 
     findings: List[Finding] = []
     deferred = _has_deferred_annotations(tree)
@@ -233,7 +237,7 @@ def scan_source(source: str, path: str):
                 add(node, feature, confirmed=not deferred and id(node) not in lazy_ids)
         # PEP 604 unions: a BitOr inside an annotation slot.
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-            if id(node) in annotation_roots or _in_annotation(node, annotation_roots):
+            if id(node) in inside_annotation:
                 feature = ANNOTATION_FEATURES["pep604_union"]
                 add(node, feature, confirmed=not deferred and id(node) not in lazy_ids)
         # Module-anchored attributes.
@@ -273,10 +277,35 @@ def _has_deferred_annotations(tree: ast.Module) -> bool:
     return False
 
 
+# PEP 263: a coding declaration lives in a comment on one of the first
+# two lines, as `coding[:=]\s*<name>`.
+_CODING_COOKIE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-_.a-zA-Z0-9]+)", re.MULTILINE)
+
+
+def _read_source(path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Reads one Python file as text. Returns (source, error); exactly one is
+    None. UTF-8 first, then the PEP 263 coding the file declares. A file that
+    no codec can decode is reported, never raised through."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError as utf8_error:
+        match = _CODING_COOKIE.search(data[:400])
+        if match is not None:
+            codec = match.group(1).decode("ascii", "replace")
+            try:
+                return data.decode(codec), None
+            except (LookupError, UnicodeDecodeError):
+                pass
+        return None, "%s: %s" % (type(utf8_error).__name__, utf8_error)
+
+
 def scan_file(path: str, source: Optional[str] = None) -> Tuple[List[Finding], Optional[Unparsable]]:
     if source is None:
-        with open(path, "r", encoding="utf-8") as handle:
-            source = handle.read()
+        source, read_error = _read_source(path)
+        if source is None:
+            return [], Unparsable(path, 1, "not decodable as Python source: " + (read_error or ""))
     return scan_source(source, path)
 
 
