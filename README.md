@@ -140,6 +140,8 @@ Also from the same author, all zero-dependency Python CLIs:
 - [githotspot](https://github.com/doge-th/githotspot) — churn × complexity hotspots in any git repo
 - [todomold](https://github.com/doge-th/todomold) — which TODOs have rotted, ranked by blame age
 - [awakehours](https://github.com/doge-th/awakehours) — timezone meeting grid for distributed teams
+- [csvpulse](https://github.com/doge-th/csvpulse) — the health of a CSV file in one command
+- [commitnotes](https://github.com/doge-th/commitnotes) — release notes from conventional commits, with no dependencies
 
 ## License
 
